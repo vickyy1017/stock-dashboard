@@ -1,102 +1,140 @@
 import { useState, useEffect, useCallback } from "react";
 import { toast } from "sonner";
-import { ThumbsUp, ExternalLink, Send, TrendingUp, RefreshCw } from "lucide-react";
+import { ThumbsUp, ExternalLink, Send, TrendingUp, RefreshCw, Loader2 } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 interface StockRequest {
-  id: string;
+  id: number;
   ticker: string;
-  companyName: string;
-  reason: string;
-  authorName: string;
+  company_name: string | null;
+  reason: string | null;
+  author_name: string;
   likes: number;
-  createdAt: number;
+  created_at: string;
 }
 
-// ── Persistence helpers (localStorage) ────────────────────────────────────
-const STORAGE_KEY = "stock_requests_v1";
-const LIKED_KEY   = "stock_liked_v1";
-const FP_KEY      = "stock_fp_v1";
-
+// ── Browser fingerprint（防重复点赞）──────────────────────────────────────
 function getFingerprint(): string {
-  let fp = localStorage.getItem(FP_KEY);
+  const key = "stock_fp_v2";
+  let fp = localStorage.getItem(key);
   if (!fp) {
     fp = Math.random().toString(36).slice(2) + Date.now().toString(36);
-    localStorage.setItem(FP_KEY, fp);
+    localStorage.setItem(key, fp);
   }
   return fp;
 }
 
-function loadRequests(): StockRequest[] {
+function getLikedSet(): Set<number> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-
-function saveRequests(reqs: StockRequest[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(reqs));
-}
-
-function getLikedSet(): Set<string> {
-  try {
-    const raw = localStorage.getItem(LIKED_KEY);
+    const raw = localStorage.getItem("liked_ids_v2");
     return new Set(raw ? JSON.parse(raw) : []);
   } catch { return new Set(); }
 }
 
-function addLiked(id: string) {
+function addLikedId(id: number) {
   const s = getLikedSet();
   s.add(id);
-  localStorage.setItem(LIKED_KEY, JSON.stringify(Array.from(s)));
+  localStorage.setItem("liked_ids_v2", JSON.stringify(Array.from(s)));
+}
+
+// ── API helpers ────────────────────────────────────────────────────────────
+const API = "/api/board";
+
+async function fetchRequests(): Promise<StockRequest[]> {
+  const r = await fetch(API);
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.message || "获取失败");
+  return j.data;
+}
+
+async function submitRequest(body: {
+  ticker: string;
+  companyName: string;
+  reason: string;
+  authorName: string;
+}): Promise<StockRequest> {
+  const r = await fetch(API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.message || "提交失败");
+  return j.data;
+}
+
+async function likeRequest(requestId: number, fingerprint: string): Promise<{ ok: boolean; message?: string }> {
+  const r = await fetch(API, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId, fingerprint }),
+  });
+  return r.json();
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
 export default function BoardPage() {
   const [requests, setRequests] = useState<StockRequest[]>([]);
-  const [likedSet, setLikedSet] = useState<Set<string>>(new Set());
+  const [likedSet, setLikedSet] = useState<Set<number>>(new Set());
+  const [loading, setLoading] = useState(true);
   const [form, setForm] = useState({ ticker: "", companyName: "", reason: "", authorName: "" });
   const [submitting, setSubmitting] = useState(false);
+  const fp = getFingerprint();
 
-  const refresh = useCallback(() => {
-    const reqs = loadRequests().sort((a, b) => b.likes - a.likes || b.createdAt - a.createdAt);
-    setRequests(reqs);
-    setLikedSet(getLikedSet());
+  const refresh = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await fetchRequests();
+      setRequests(data);
+      setLikedSet(getLikedSet());
+    } catch (e: any) {
+      toast.error("加载失败：" + e.message);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.ticker.trim() || !form.authorName.trim()) {
       toast.error("股票代码和你的名字是必填项");
       return;
     }
     setSubmitting(true);
-    const newReq: StockRequest = {
-      id: Math.random().toString(36).slice(2) + Date.now().toString(36),
-      ticker: form.ticker.trim().toUpperCase(),
-      companyName: form.companyName.trim(),
-      reason: form.reason.trim(),
-      authorName: form.authorName.trim(),
-      likes: 0,
-      createdAt: Date.now(),
-    };
-    const updated = [newReq, ...loadRequests()];
-    saveRequests(updated);
-    setForm({ ticker: "", companyName: "", reason: "", authorName: "" });
-    toast.success("申请已提交！感谢你的建议 🎉");
-    setSubmitting(false);
-    refresh();
+    try {
+      await submitRequest({
+        ticker: form.ticker.trim().toUpperCase(),
+        companyName: form.companyName.trim(),
+        reason: form.reason.trim(),
+        authorName: form.authorName.trim(),
+      });
+      toast.success("申请已提交！感谢你的建议 🎉");
+      setForm({ ticker: "", companyName: "", reason: "", authorName: "" });
+      await refresh();
+    } catch (e: any) {
+      toast.error("提交失败：" + e.message);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const handleLike = (id: string) => {
+  const handleLike = async (id: number) => {
     if (likedSet.has(id)) { toast.info("你已经点赞过了"); return; }
-    const reqs = loadRequests().map(r => r.id === id ? { ...r, likes: r.likes + 1 } : r);
-    saveRequests(reqs);
-    addLiked(id);
-    refresh();
-    toast.success("点赞成功！");
+    try {
+      const res = await likeRequest(id, fp);
+      if (res.ok) {
+        addLikedId(id);
+        setLikedSet(getLikedSet());
+        setRequests(prev => prev.map(r => r.id === id ? { ...r, likes: r.likes + 1 } : r));
+        toast.success("点赞成功！");
+      } else {
+        toast.info(res.message || "已点赞");
+      }
+    } catch (e: any) {
+      toast.error("点赞失败：" + e.message);
+    }
   };
 
   return (
@@ -107,11 +145,19 @@ export default function BoardPage() {
           <div className="w-1 h-6 rounded-sm bg-blue-500" />
           <div>
             <h2 className="text-lg font-bold text-zinc-100">股票申请留言板</h2>
-            <p className="text-xs text-zinc-500 mt-0.5">想看哪只股票的分析？在这里提交申请，点赞支持你最想要的！</p>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              想看哪只股票的分析？提交申请，点赞支持你最想要的！
+              <span className="ml-2 text-blue-500">· 所有访客共享同一份留言板</span>
+            </p>
           </div>
         </div>
-        <button onClick={refresh} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 text-xs text-zinc-400 hover:text-zinc-200 transition-colors">
-          <RefreshCw size={12} /> 刷新
+        <button
+          onClick={refresh}
+          disabled={loading}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 text-xs text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
+        >
+          {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+          刷新
         </button>
       </div>
 
@@ -123,7 +169,9 @@ export default function BoardPage() {
         </div>
         <div className="grid grid-cols-2 gap-3 mb-3">
           <div>
-            <label className="text-xs text-zinc-500 mb-1 block">股票代码 <span className="text-red-400">*</span></label>
+            <label className="text-xs text-zinc-500 mb-1 block">
+              股票代码 <span className="text-red-400">*</span>
+            </label>
             <input
               value={form.ticker}
               onChange={e => setForm(p => ({ ...p, ticker: e.target.value.toUpperCase() }))}
@@ -156,7 +204,9 @@ export default function BoardPage() {
         </div>
         <div className="flex gap-3 items-end">
           <div className="flex-1">
-            <label className="text-xs text-zinc-500 mb-1 block">你的名字 <span className="text-red-400">*</span></label>
+            <label className="text-xs text-zinc-500 mb-1 block">
+              你的名字 <span className="text-red-400">*</span>
+            </label>
             <input
               value={form.authorName}
               onChange={e => setForm(p => ({ ...p, authorName: e.target.value }))}
@@ -170,45 +220,69 @@ export default function BoardPage() {
             disabled={submitting}
             className="flex items-center gap-2 px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white rounded-lg text-sm font-semibold transition-all active:scale-95"
           >
-            <Send size={14} />
+            {submitting ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
             {submitting ? "提交中..." : "提交申请"}
           </button>
         </div>
       </form>
 
       {/* List */}
-      <div className="space-y-3">
-        {requests.length === 0 ? (
-          <div className="text-center py-16 text-zinc-600">
-            <TrendingUp size={40} className="mx-auto mb-3 opacity-30" />
-            <div className="text-sm">还没有申请，成为第一个！</div>
-          </div>
-        ) : (
-          requests.map((req, i) => {
+      {loading && requests.length === 0 ? (
+        <div className="text-center py-16 text-zinc-600">
+          <Loader2 size={32} className="mx-auto mb-3 animate-spin opacity-50" />
+          <div className="text-sm">加载中...</div>
+        </div>
+      ) : requests.length === 0 ? (
+        <div className="text-center py-16 text-zinc-600">
+          <TrendingUp size={40} className="mx-auto mb-3 opacity-30" />
+          <div className="text-sm">还没有申请，成为第一个！</div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {requests.map((req, i) => {
             const hasLiked = likedSet.has(req.id);
             return (
-              <div key={req.id}
-                className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex items-start gap-4 hover:border-zinc-700 transition-colors">
-                <div className="text-2xl font-black text-zinc-700 w-8 text-center shrink-0 mt-0.5">{i + 1}</div>
+              <div
+                key={req.id}
+                className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex items-start gap-4 hover:border-zinc-700 transition-colors"
+              >
+                {/* Rank */}
+                <div className="text-2xl font-black text-zinc-700 w-8 text-center shrink-0 mt-0.5">
+                  {i + 1}
+                </div>
+
+                {/* Content */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <span className="text-base font-black text-blue-400">{req.ticker}</span>
-                    {req.companyName && <span className="text-xs text-zinc-400">{req.companyName}</span>}
+                    {req.company_name && (
+                      <span className="text-xs text-zinc-400">{req.company_name}</span>
+                    )}
                     <a
                       href={`https://www.tradingview.com/chart/?symbol=${req.ticker}`}
-                      target="_blank" rel="noopener noreferrer"
+                      target="_blank"
+                      rel="noopener noreferrer"
                       className="flex items-center gap-1 text-xs text-zinc-500 hover:text-blue-400 transition-colors"
                     >
-                      <ExternalLink size={11} /> TradingView
+                      <ExternalLink size={11} />
+                      TradingView
                     </a>
                   </div>
-                  {req.reason && <p className="text-xs text-zinc-400 leading-relaxed mb-2">{req.reason}</p>}
+                  {req.reason && (
+                    <p className="text-xs text-zinc-400 leading-relaxed mb-2">{req.reason}</p>
+                  )}
                   <div className="flex items-center gap-2 text-xs text-zinc-600">
-                    <span>by {req.authorName}</span>
+                    <span>by {req.author_name}</span>
                     <span>·</span>
-                    <span>{new Date(req.createdAt).toLocaleDateString("zh-CN")}</span>
+                    <span>
+                      {new Date(req.created_at).toLocaleDateString("zh-CN", {
+                        year: "numeric", month: "short", day: "numeric"
+                      })}
+                    </span>
                   </div>
                 </div>
+
+                {/* Like button */}
                 <button
                   onClick={() => handleLike(req.id)}
                   className={`flex flex-col items-center gap-1 px-3 py-2 rounded-xl border transition-all active:scale-95 shrink-0 ${
@@ -222,12 +296,13 @@ export default function BoardPage() {
                 </button>
               </div>
             );
-          })
-        )}
-      </div>
+          })}
+        </div>
+      )}
 
+      {/* Footer note */}
       <div className="mt-6 p-4 bg-zinc-900/50 border border-zinc-800 rounded-xl text-xs text-zinc-600 leading-relaxed">
-        💡 留言数据保存在你的浏览器本地存储中。每位访客看到的是自己提交的申请记录。
+        💾 留言数据存储在云端数据库，所有访客看到的是同一份留言板。
       </div>
     </div>
   );
